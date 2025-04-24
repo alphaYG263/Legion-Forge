@@ -9,6 +9,7 @@ import asyncio
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+DEV_GUILD_ID = 1364844968375619604  # Your development guild ID
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -51,6 +52,15 @@ async def reload_cogs(ctx):
             except Exception as e:
                 await ctx.send(f"❌ Failed to reload `{ext}`")
                 logger.error(f"Failed to reload {ext}: {e}")
+    
+    # Sync commands after reload
+    try:
+        dev_guild = discord.Object(id=DEV_GUILD_ID)
+        synced = await bot.tree.sync(guild=dev_guild)
+        await ctx.send(f"✅ Synced {len(synced)} commands to dev guild")
+    except Exception as e:
+        await ctx.send(f"❌ Failed to sync commands: {e}")
+        logger.error(f"Failed to sync commands: {e}")
 
 async def load_cogs():
     for file in os.listdir('./commands'):
@@ -73,18 +83,20 @@ async def on_ready():
 
     print(f"{bot.user} is online!")
     logger.info(f"{bot.user} is online!")
+    
+    # Load all cogs first
     await load_cogs()
     
-    # Add this line to sync all commands at once
+    # Then sync commands AFTER all cogs are loaded
     try:
-        dev_guild = discord.Object(id=1364844968375619604)  # Your dev guild ID
-        await bot.tree.sync(guild=dev_guild)
-        logger.info("Slash commands synced to dev guild")
+        dev_guild = discord.Object(id=DEV_GUILD_ID)
+        synced = await bot.tree.sync(guild=dev_guild)
+        logger.info(f"Synced {len(synced)} commands to dev guild")
     except Exception as e:
         logger.error(f"Failed to sync commands: {e}")
 
 # MongoDB setup
-mongo_uri = os.getenv("MONGO_URI")
+mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://alphayg:yogialpha12345@fantasyleague.1id3c.mongodb.net/?retryWrites=true&w=majority&appName=FantasyLeague")
 bot.db = MongoClient(mongo_uri)["Forgelegion"]
 
 bot.run(TOKEN)
