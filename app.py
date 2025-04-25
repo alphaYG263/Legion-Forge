@@ -26,17 +26,57 @@ class DiscordHandler(logging.Handler):
         self.bot = bot
         self.channel_id = channel_id
         self.channel = None
-
+        self.queue = []
+        self.lock = asyncio.Lock()
+        self.processing = False
+        
     async def send(self, message):
         if self.channel is None:
             self.channel = self.bot.get_channel(self.channel_id)
             if self.channel is None:
                 return
-        await self.channel.send(message)
+        
+        # Add some basic batching by combining multiple messages
+        if len(message) > 1900:  # Discord message limit is 2000 chars
+            chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
+            for chunk in chunks:
+                await self.channel.send(chunk)
+                await asyncio.sleep(1)  # Wait between chunks
+        else:
+            await self.channel.send(message)
+
+    async def process_queue(self):
+        if self.processing:
+            return
+            
+        self.processing = True
+        try:
+            while self.queue:
+                async with self.lock:
+                    # Get up to 5 messages to batch
+                    messages = self.queue[:5]
+                    self.queue = self.queue[5:]
+                
+                if messages:
+                    combined = "\n".join(messages)
+                    await self.send(combined)
+                    # Rate limit ourselves to avoid Discord's rate limit
+                    await asyncio.sleep(2)
+            
+        finally:
+            self.processing = False
 
     def emit(self, record):
         log_entry = self.format(record)
-        asyncio.create_task(self.send(log_entry))
+        
+        asyncio.create_task(self.queue_message(log_entry))
+        
+    async def queue_message(self, message):
+        async with self.lock:
+            self.queue.append(message)
+        
+        # Start processing if not already running
+        asyncio.create_task(self.process_queue())
 
 @bot.command(name='reload')
 @commands.is_owner()
