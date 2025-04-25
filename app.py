@@ -26,9 +26,8 @@ class DiscordHandler(logging.Handler):
         self.bot = bot
         self.channel_id = channel_id
         self.channel = None
-        self.queue = []
-        self.lock = asyncio.Lock()
-        self.processing = False
+        self.queue = asyncio.Queue()
+        self.task = None
         
     async def send(self, message):
         if self.channel is None:
@@ -36,7 +35,7 @@ class DiscordHandler(logging.Handler):
             if self.channel is None:
                 return
         
-        # Add some basic batching by combining multiple messages
+        # Split message if too long
         if len(message) > 1900:  # Discord message limit is 2000 chars
             chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
             for chunk in chunks:
@@ -45,38 +44,48 @@ class DiscordHandler(logging.Handler):
         else:
             await self.channel.send(message)
 
-    async def process_queue(self):
-        if self.processing:
-            return
-            
-        self.processing = True
-        try:
-            while self.queue:
-                async with self.lock:
-                    # Get up to 5 messages to batch
-                    messages = self.queue[:5]
-                    self.queue = self.queue[5:]
+    async def queue_processor(self):
+        """Background task to process log messages"""
+        while True:
+            # Gather up to 5 messages or wait up to 5 seconds
+            messages = []
+            try:
+                # Get at least one message
+                messages.append(await asyncio.wait_for(self.queue.get(), timeout=5.0))
+                self.queue.task_done()
                 
+                # Try to get more messages without waiting too long
+                for _ in range(4):  # Up to 4 more (5 total)
+                    try:
+                        messages.append(await asyncio.wait_for(self.queue.get(), timeout=0.5))
+                        self.queue.task_done()
+                    except asyncio.TimeoutError:
+                        break
+                
+                # Send the batch
                 if messages:
                     combined = "\n".join(messages)
                     await self.send(combined)
-                    # Rate limit ourselves to avoid Discord's rate limit
+                    # Rate limit ourselves
                     await asyncio.sleep(2)
-            
-        finally:
-            self.processing = False
+                    
+            except asyncio.TimeoutError:
+                # No messages for a while, just continue the loop
+                continue
+            except Exception as e:
+                print(f"Error in queue processor: {e}")
+                await asyncio.sleep(5)  # Back off on error
 
     def emit(self, record):
+        """This runs in the logging thread, not in the asyncio loop"""
         log_entry = self.format(record)
         
-        asyncio.create_task(self.queue_message(log_entry))
+        # Put in queue for async processing
+        asyncio.run_coroutine_threadsafe(self.queue.put(log_entry), self.bot.loop)
         
-    async def queue_message(self, message):
-        async with self.lock:
-            self.queue.append(message)
-        
-        # Start processing if not already running
-        asyncio.create_task(self.process_queue())
+        # Start the background task if not already running
+        if self.task is None or self.task.done():
+            self.task = self.bot.loop.create_task(self.queue_processor())
 
 @bot.command(name='reload')
 @commands.is_owner()
@@ -118,6 +127,9 @@ async def on_ready():
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    
+    # Start the log processing task
+    handler.task = bot.loop.create_task(handler.queue_processor())
 
     bot.logger = logger
 
@@ -136,7 +148,7 @@ async def on_ready():
         logger.error(f"Failed to sync commands: {e}")
 
 # MongoDB setup
-mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://alphayg:yogialpha12345@fantasyleague.1id3c.mongodb.net/?retryWrites=true&w=majority&appName=FantasyLeague")
+mongo_uri = os.getenv("MONGO_URI")
 bot.db = MongoClient(mongo_uri)["Forgelegion"]
 
 bot.run(TOKEN)
